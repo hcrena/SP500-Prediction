@@ -1,0 +1,255 @@
+---
+title: "P4Code_v4"
+output:
+  html_document: default
+  word_document: default
+---
+##Set up
+```{r setup, include=FALSE}
+setwd("/Users/renachoi/Desktop/STAT300W/Project 4")
+library(readxl)
+library(TSA)
+library(forecast)
+library(MASS)
+library(tseries)
+library(astsa)
+#install.packages("fGarch")
+library(fGarch)
+library(timeSeries)
+library(xts)
+
+#https://otexts.com/fpp2/seasonal-arima.html
+#https://www.section.io/engineering-education/predicting-future-stock-prices-using-aima-model-in-r/
+```
+
+## Load data 
+
+```{r SP500}
+y<-  read_excel("STAT300_S&P500_scenario.xlsx", col_names=TRUE)
+
+sp500 = y[order(nrow(y):1),]
+sp500$Date <- as.Date.character(sp500$Date, "%B %d %Y")
+
+ts <- ts(sp500$`S&P 500 Price`,start = 1950, frequency = 12)
+
+plot(ts, ylab = "S&P 500 Price", main = "S&P 500 index from 1950 to 2022")
+```
+
+## Initial assessment
+
+```{r Initial Assessment}
+##Check stationarity
+
+adf.test(ts)
+# as its p-value is 0.99 which fails to reject the null hypothesis, the data is not stationary. So we require to transform data to make it stationary
+```
+
+## Transformation
+
+```{r Transformation}
+
+#Determine the transformation method
+#par(cex=0.8)
+box_cox_transformation<-boxcox(ts~1, lambda=seq(-1,1,0.1))
+y_values<-as.numeric(box_cox_transformation$y)
+
+#extract lambda
+lambda<-box_cox_transformation$x[which.max(y_values)] #-0.0505
+abline(v=lambda, col=2, lty="dashed")
+text(lambda+0.05,max(box_cox_transformation$y), round(lambda,2), cex=0.85)
+title(expression(paste("The ML estimate of ", lambda )), cex=0.85)
+
+#seems we need log-transformed as the lambda from the boxcox plot is -0.05 which really close to 0
+
+ggtsdisplay(log(ts)) 
+adf.test(log(ts))
+#seems it is still not stationary as showing a trend and p-value form ADF test is greater than 0.05
+#which implies we need differicing along with the log-transformed
+
+#how much differencing?
+ndiffs(log(ts)) #1 differecing is required
+nsdiffs(log(ts)) #0 seasonal differencing is required
+
+#tranform the data 
+diff_ts1 = diff(log(ts))
+adf.test(diff_ts1) #confirmed stationary
+plot(diff_ts1, main="Plot of log differenced series")
+acf.sample = acf(diff_ts1, lag.max=40, plot = TRUE, main = "ACF of sample")
+pacf.sample = pacf(diff_ts1, lag.max=40, plot = TRUE, main = "PACF of sample")
+
+ggtsdisplay(diff_ts1) 
+```
+## Trend with CI
+```{r Trend of the Risk}
+##CI gives idea of the likely values
+
+```
+
+##Risk Measurment
+```{r Risk Measurement}
+#https://www.investopedia.com/articles/04/092904.asp
+#check if it is normally distributed
+hist(diff_ts1, col='steelblue', main='Normal')
+
+#qqplot
+qqnorm(diff_ts1, main='Normal')
+qqline(diff_ts1)
+
+#shaprio test
+shapiro.test(diff_ts1) #as it rejects H0, it is not normal
+
+ks.test(diff_ts1, 'pnorm')
+
+#METHOD1
+mu <- round(mean(diff_ts1),8)
+sig <- round(sd(diff_ts1),8)
+
+#Definition of VaR
+# the amount that a portfolio might lose, with a given probability, over a given time period
+# the max loss in the portfolio, over the next trading day, if we exclude the worst 5% of possible outcomes
+#The VaR at the 95% confidence level for the daily log returns can be calculated using the estimated mean (mu) and estimated standard deviation (sig):
+
+set.seed(12345678)
+rvec <- sample(as.vector(diff_ts1),100000,replace=TRUE)
+#Note: again, we set the seed value here to allow us to reproduce the same result each time. In actual practice, we will not set the seed to a given number.
+
+#The VaR at the 95% confidence level is the 5% quantile of these 100,000 outcomes. 
+VaR <- quantile(rvec,0.05)
+
+#METHOD 2
+#Value at Risk (VaR) is the most widely used market risk measure in financial risk management and it is also used by practitioners such as portfolio managers to account for future market risk. VaR can be defined as loss in market value of an asset over a given time period that is exceeded with a probability  
+
+library(ggplot2)
+library(quantmod)
+ts_return = dailyReturn(ts, type = "log") #getting same as diff_ts1
+den_ts = coredata(ts_return)
+distr_ts = dnorm(x = den_ts, mean = mean(den_ts), sd = sd(den_ts))
+data_rd = data.frame(den_ts, distr_ts)
+# change column names
+colnames(data_rd) = c("x", "y")
+# normal quantile
+var1 = quantile(den_ts, 0.05)
+p3 = ggplot(data_rd, aes(x = x, y = y)) + geom_line(size = 2) + geom_vline(xintercept = var1,
+    lty = 2, col = "red", size = 2) + theme_bw() + labs(title = "Normal Distribution and 5% (Empirical) VaR")
+p3
+```
+
+
+## Fit the model
+
+```{r SARMIA Model}
+#parameter estimate
+auto.arima(diff_ts1, trace=TRUE) #ARIMA(0,0,1)(1,0,0)[12] 
+
+fit <- sarima(diff_ts1, 0,0,1,1,0,0,12)
+fit1 <- Arima(diff_ts1, order=c(0,0,1), seasonal=c(1,0,0))
+#checked they gave us same results
+```
+
+
+## Model Diagnostics
+```{r Model Diagnostics}
+#choose model with smaller error terms
+
+#method 1 - AIC
+
+
+#method 2 - ACF of Residuals
+checkresiduals(fit1)
+# we dont want them to be significant.
+#There are a few significant spikes in the ACF
+
+#method 3 - Ljung-Box statistics
+#The Ljung-Box test also shows that the residuals have no remaining autocorrelations
+#H0: the population error term is 0
+#Ha: the population error term is not 0
+#since the pvalue is great than 0.05, we fail to reject the null hypothesis and we now have a seasonal ARIMA model that passes the required checks and is ready for forecasting. 
+
+```
+
+## GARCH & votality
+```{r GARCH and votality}
+library(xts)
+library(PerformanceAnalytics)
+library(rugarch)
+#https://www.idrisstsafack.com/post/garch-models-with-r-programming-a-practical-example-with-tesla-stock
+
+# Return
+return <- diff_ts1[-1]
+hist(return)
+chart.Histogram(diff_ts1,
+                method=c('add.density','add.normal'),
+                colorset=c('blue','red','green'))
+
+#sGARCH model with constant mean
+s <- ugarchspec(mean.model=list(armaOrder = c(1,1)),
+                variance.model =list(model="sGARCH"),
+                distribution.model = "norm")
+m <- ugarchfit(data=return,spec=s)
+
+#The estimated parameters are in
+m@fit$coef
+plot(m,which="all")
+m
+
+```
+
+
+## Forecasting
+```{r Forecasting}
+
+
+#sarima,for function
+forecast <- sarima.for(log(ts),0,1,1,1,0,0,12, n.ahead=36)
+
+#actual return
+exp(forecast$pred)
+
+#taking out log-transformed to get actual return
+
+#95% CI P.E.
+log_upper = forecast$pred + 1.96 * forecast$se
+log_lower = forecast$pred - 1.96 * forecast$se
+U = exp( log_upper )
+L = exp( log_lower )
+
+#99% CI  P.E.
+log_upper3 = forecast$pred + 2.58 * forecast$se
+log_lower3 = forecast$pred - 2.58 * forecast$se
+U3 = exp( log_upper3 )
+L3 = exp( log_lower3 )
+
+plot(ts,xlim =c(2020, 2026),  ylim=c(0, 5500), type = 'o',
+main = "Plot of 3 years prediction of S&P 500 index ", ylab="S&P 500 index price")
+lines(exp(forecast$pred), col = 2, type = 'o' )
+
+xx = c(time(U), rev(time(U)))
+yy = c(L, rev(U))
+xx3 = c(time(U3), rev(time(U3)))
+yy3 = c(L3, rev(U3))
+polygon(xx, yy, border = 8, col = gray(0.6, alpha = 0.2)) #gray
+polygon(xx3, yy3, border = 6, col = gray(0.6, alpha = 0.1)) #purple
+
+
+#arima and forecast
+logts <- log(ts)
+sarima_forecast_model <- Arima(logts, order=c(0,1,1), seasonal = list(order = c(1, 0, 0), period = 12))
+summary(sarima_forecast_model)
+forecast_model <- forecast(sarima_forecast_model, h = 36)
+forecast_model %>% autoplot() + autolayer(logts)
+
+#forecast from GARCH model
+sf <- ugarchspec(mean.model=list(armaOrder = c(1,1)),
+                variance.model =list(model="sGARCH"),
+                distribution.model = "norm")
+mf <- ugarchfit(data=return,spec=sf)
+
+f<- ugarchforecast(fitORspec = mf,
+                   n.ahead=36)
+
+
+plot(fitted(f))
+plot(sigma(f))
+
+```
+
